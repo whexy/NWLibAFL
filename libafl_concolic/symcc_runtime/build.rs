@@ -225,6 +225,7 @@ fn build_and_link_symcc_runtime(symcc_src_path: &Path, rename_header_path: &Path
             "-include \"{}\"",
             rename_header_path.to_str().unwrap()
         ))
+        .cxxflag(format!("-Wno-deprecated"))
         .build()
         .join("lib");
     link_with_cpp_stdlib();
