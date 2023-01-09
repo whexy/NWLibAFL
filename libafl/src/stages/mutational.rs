@@ -1,16 +1,18 @@
 //| The [`MutationalStage`] is the default stage used during fuzzing.
 //! For the current input, it will perform a range of random mutations, and then run them in the executor.
 
+use alloc::string::ToString;
 use core::marker::PhantomData;
 
 #[cfg(feature = "introspection")]
 use crate::monitors::PerfFeature;
 use crate::{
     bolts::rands::Rand,
-    corpus::Corpus,
+    corpus::{testcase::RLFuzzTestcaseMetaData, Corpus},
     fuzzer::Evaluator,
     mark_feature_time,
     mutators::Mutator,
+    prelude::HasMetadata,
     stages::Stage,
     start_timer,
     state::{HasClientPerfMonitor, HasCorpus, HasRand, UsesState},
@@ -66,10 +68,62 @@ where
             mark_feature_time!(state, PerfFeature::Mutate);
 
             // Time is measured directly the `evaluate_input` function
-            let (_, corpus_idx) = fuzzer.evaluate_input(state, executor, manager, input)?;
+            let (result, new_corpus_idx) =
+                fuzzer.evaluate_input(state, executor, manager, input)?;
+
+            // TODO! update metadata of the testcase
+            match result {
+                crate::ExecuteInputResult::None => {}
+                crate::ExecuteInputResult::Corpus => {
+                    println!("😁 Find new testcase!");
+                    let mut testcase = state.corpus().get(corpus_idx)?.borrow_mut();
+                    if !testcase.has_metadata::<RLFuzzTestcaseMetaData>() {
+                        let mut rlmeta = RLFuzzTestcaseMetaData::new();
+                        *rlmeta.corpus_idx_mut() = corpus_idx;
+                        testcase.add_metadata::<RLFuzzTestcaseMetaData>(rlmeta);
+                    }
+                    println!("😁 modify metadata of testcase {}!", corpus_idx);
+                    let rlmeta = testcase
+                        .metadata_mut()
+                        .get_mut::<RLFuzzTestcaseMetaData>()
+                        .ok_or_else(|| {
+                            Error::key_not_found("Failed to get RLFuzzMetadata".to_string())
+                        })?;
+
+                    let generated = rlmeta.generated_mut();
+                    *generated += 1;
+
+                    println!("{:?}", rlmeta);
+                }
+                crate::ExecuteInputResult::Solution => {
+                    println!("😁 Find new solution!");
+                    let mut testcase = state.corpus().get(corpus_idx)?.borrow_mut();
+                    if !testcase.has_metadata::<RLFuzzTestcaseMetaData>() {
+                        let mut rlmeta = RLFuzzTestcaseMetaData::new();
+                        *rlmeta.corpus_idx_mut() = corpus_idx;
+                        testcase.add_metadata::<RLFuzzTestcaseMetaData>(rlmeta);
+                    }
+                    println!("😁 modify metadata of testcase {}!", corpus_idx);
+                    let rlmeta = testcase
+                        .metadata_mut()
+                        .get_mut::<RLFuzzTestcaseMetaData>()
+                        .ok_or_else(|| {
+                            Error::key_not_found("Failed to get RLFuzzMetadata".to_string())
+                        })?;
+
+                    let generated = rlmeta.generated_mut();
+                    *generated += 1;
+
+                    let new_path = rlmeta.new_path_mut();
+                    *new_path += 1;
+
+                    println!("{:?}", rlmeta);
+                }
+            };
 
             start_timer!(state);
-            self.mutator_mut().post_exec(state, i as i32, corpus_idx)?;
+            self.mutator_mut()
+                .post_exec(state, i as i32, new_corpus_idx)?;
             mark_feature_time!(state, PerfFeature::MutatePostExec);
         }
         Ok(())

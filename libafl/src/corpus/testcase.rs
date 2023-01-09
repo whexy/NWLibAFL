@@ -272,6 +272,82 @@ where
     }
 }
 
+/// The Metadata for each testcase used in RL+Fuzz schedules.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RLFuzzTestcaseMetaData {
+    /// corpus index
+    corpus_idx: usize,
+    /// Number of generated inputs exercising this testcase
+    exercise: usize,
+    /// Number of generated inputs from this testcase
+    generated: usize,
+    /// Number of crashes or new paths found from this testcase
+    new_path: usize,
+}
+
+impl RLFuzzTestcaseMetaData {
+    /// Create new [`struct@RLFuzzTestcaseMetaData`]
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            corpus_idx: 0,
+            exercise: 0,
+            generated: 0,
+            new_path: 0,
+        }
+    }
+
+    /// Get the corpus index
+    #[inline]
+    pub fn corpus_idx(&self) -> usize {
+        self.corpus_idx
+    }
+
+    /// Get the corpus index (mutable)
+    #[inline]
+    pub fn corpus_idx_mut(&mut self) -> &mut usize {
+        &mut self.corpus_idx
+    }
+
+    /// Get the exercise
+    #[inline]
+    pub fn exercise(&self) -> usize {
+        self.exercise
+    }
+
+    /// Get the exercise (mutable)
+    #[inline]
+    pub fn exercise_mut(&mut self) -> &mut usize {
+        &mut self.exercise
+    }
+
+    /// Get the generated
+    #[inline]
+    pub fn generated(&self) -> usize {
+        self.generated
+    }
+
+    /// Get the generated (mutable)
+    #[inline]
+    pub fn generated_mut(&mut self) -> &mut usize {
+        &mut self.generated
+    }
+
+    /// Get the new path
+    #[inline]
+    pub fn new_path(&self) -> usize {
+        self.new_path
+    }
+
+    /// Get the new path (mutable)
+    #[inline]
+    pub fn new_path_mut(&mut self) -> &mut usize {
+        &mut self.new_path
+    }
+}
+
+crate::impl_serdeany!(RLFuzzTestcaseMetaData);
+
 /// The Metadata for each testcase used in power schedules.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SchedulerTestcaseMetaData {

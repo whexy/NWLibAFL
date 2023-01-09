@@ -30,6 +30,8 @@ pub use powersched::PowerQueueScheduler;
 pub mod tuneable;
 pub use tuneable::*;
 
+pub mod rlsched;
+
 use crate::{
     bolts::rands::Rand,
     corpus::{Corpus, Testcase},
