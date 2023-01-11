@@ -1,18 +1,15 @@
 //! The RLFuzzer schedulers are a family of schedulers that use the bandit
 //! algorithm to get a better result of corpus selecting.
 
-use alloc::{borrow::ToOwned, vec::Vec};
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use serde::{Deserialize, Serialize};
 
-use super::testcase_score::{
-    GeneratedTestcaseScore, SeedSelectionTestcaseScore, SeedTimeTestcaseScore,
-};
 use crate::{
     corpus::{testcase::RLFuzzTestcaseMetaData, Corpus},
     inputs::UsesInput,
-    schedulers::{Scheduler, TestcaseScore},
+    schedulers::Scheduler,
     state::{HasCorpus, HasMetadata, UsesState},
     Error,
 };
@@ -35,6 +32,27 @@ where
     G: TestcaseDistribution<S>,
 {
     phantom: PhantomData<(S, F, G)>,
+    strategy_num: usize,
+}
+
+impl<S, F, G> TestcaseDistributionCombiner<S, F, G>
+where
+    S: HasCorpus + HasMetadata,
+    F: TestcaseDistribution<S>,
+    G: TestcaseDistribution<S>,
+{
+    /// Create a new [`TestcaseDistributionCombiner`].
+    pub fn new(strategy_num: usize) -> Self {
+        Self {
+            phantom: PhantomData,
+            strategy_num: strategy_num,
+        }
+    }
+
+    /// get the number of strategies in the combiner.
+    pub fn strategy_num(&self) -> usize {
+        self.strategy_num
+    }
 }
 
 impl<S, F, G> TestcaseDistribution<S> for TestcaseDistributionCombiner<S, F, G>
@@ -105,85 +123,122 @@ pub type CombinedDistribution<S> =
 
 /// The metadata used in bendit algorithm
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct BenditMetadata {
+pub struct BanditMetadata {
     /// weight for different arms
     weights: Vec<f64>,
+    /// probability of last round
+    prob: Vec<f64>,
+    /// advice of last round
+    last_advice: Vec<Vec<f64>>,
+    /// index of the last selected seed
+    last_selected_seed: usize,
+    /// index of the last selected expert
+    last_selected_exp: usize,
+    /// if the last seed generated new path
+    reward: bool,
 }
 
-crate::impl_serdeany!(BenditMetadata);
+crate::impl_serdeany!(BanditMetadata);
 
 /// Use the bandit algorithm to get a better result of corpus selecting.
 #[derive(Debug, Clone)]
-pub struct RLScheduler<S, F> {
-    phantom: PhantomData<(S, F)>,
+pub struct BanditScheduler<S, F, G>
+where
+    S: HasCorpus + HasMetadata,
+    F: TestcaseDistribution<S>,
+    G: TestcaseDistribution<S>,
+{
+    phantom: PhantomData<(S, F, G)>,
+    combiner: TestcaseDistributionCombiner<S, F, G>,
+    gamma: f64,
 }
 
-impl<S, F> UsesState for RLScheduler<S, F>
+impl<S, F, G> UsesState for BanditScheduler<S, F, G>
 where
-    S: UsesInput,
+    S: UsesInput + HasCorpus + HasMetadata,
+    F: TestcaseDistribution<S>,
+    G: TestcaseDistribution<S>,
 {
     type State = S;
 }
 
-impl<S, F> Scheduler for RLScheduler<S, F>
+impl<S, F, G> Scheduler for BanditScheduler<S, F, G>
 where
     S: HasCorpus + HasMetadata,
-    F: TestcaseScore<Self::State>,
+    F: TestcaseDistribution<S>,
+    G: TestcaseDistribution<S>,
 {
     /// Gets the next entry. Every time this function is called, scores of all testcases will be updated.
     fn next(&self, state: &mut Self::State) -> Result<usize, Error> {
         let corpus_num = state.corpus().count();
-        if corpus_num == 0 {
-            Err(Error::empty("No entries in corpus".to_owned()))
+        let advice = F::compute(state)?;
+
+        // init the bandit algorithm
+        if !state.has_metadata::<BanditMetadata>() {
+            let weights = vec![1.0; self.combiner.strategy_num()];
+            state.add_metadata(BanditMetadata {
+                weights,
+                prob: Vec::with_capacity(corpus_num),
+                last_advice: vec![],
+                last_selected_seed: 0,
+                last_selected_exp: 0,
+                reward: false,
+            })
         } else {
-            let mut min_score = f64::MAX;
-            let mut id = match state.corpus().current() {
-                Some(cur) => {
-                    if *cur + 1 >= state.corpus().count() {
-                        0
-                    } else {
-                        *cur + 1
-                    }
-                }
-                None => 0,
-            };
-            // find the seed with smallest score.
-            for idx in 0..corpus_num {
-                let mut entry = state.corpus().get(idx).unwrap().borrow_mut();
-                if let Ok(score) = F::compute(&mut *entry, state) {
-                    println!("💯 {}, {}", idx, score);
-                    if score < min_score {
-                        min_score = score;
-                        id = idx;
-                    }
-                }
-            }
-            *state.corpus_mut().current_mut() = Some(id);
-            println!("🔥 {} selected", id);
-            Ok(id)
+            // update weights with last round information
+            let bdmeta = state.metadata_mut().get_mut::<BanditMetadata>().unwrap();
+            let weights = &mut bdmeta.weights;
+            let last_advice = &bdmeta.last_advice;
+            let prob = &bdmeta.prob;
+            let reward = if bdmeta.reward { 1.0 } else { 0.0 };
+            let reward_hat = reward / prob[bdmeta.last_selected_seed];
+            let y = reward_hat * last_advice[bdmeta.last_selected_exp][bdmeta.last_selected_seed];
+            weights[bdmeta.last_selected_exp] *= (self.gamma * y / corpus_num as f64).exp();
         }
+
+        let bdmeta = state.metadata_mut().get_mut::<BanditMetadata>().unwrap();
+
+        let prob = &mut bdmeta.prob;
+        let weights = &bdmeta.weights;
+        for idx in 0..corpus_num {
+            let mut sum = 0.0;
+            let sum_of_weight = weights.iter().sum::<f64>();
+            for exp in 0..self.combiner.strategy_num() {
+                sum += weights[exp] * advice[exp][idx];
+            }
+            prob[idx] = (1.0 - self.gamma) * sum / sum_of_weight + self.gamma / corpus_num as f64;
+        }
+
+        // select the index of max number from prob
+        let mut max = 0.0;
+        let mut max_idx = 0;
+        for idx in 0..corpus_num {
+            if prob[idx] > max {
+                max = prob[idx];
+                max_idx = idx;
+            }
+        }
+
+        bdmeta.last_selected_seed = max_idx;
+        bdmeta.reward = false;
+        bdmeta.last_advice = advice;
+        Ok(max_idx)
     }
 }
 
-impl<S, F> RLScheduler<S, F>
+impl<S, F, G> BanditScheduler<S, F, G>
 where
     S: HasCorpus + HasMetadata,
-    F: TestcaseScore<S>,
+    F: TestcaseDistribution<S>,
+    G: TestcaseDistribution<S>,
 {
-    /// Creates a new [`RLScheduler`]
+    /// Creates a new [`BanditScheduler`]
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(combiner: TestcaseDistributionCombiner<S, F, G>) -> Self {
         Self {
             phantom: PhantomData,
+            combiner: combiner,
+            gamma: 0.1,
         }
     }
 }
-
-/// AFLFast-like scheduler, minimize s(i)
-pub type SelectionRLScheduler<S> = RLScheduler<S, SeedSelectionTestcaseScore<S>>;
-
-/// BlackboxFuzz-like scheduler, minimize N(i)
-pub type GeneratedRLScheduler<S> = RLScheduler<S, GeneratedTestcaseScore<S>>;
-
-/// BlackboxFuzz-like scheduler, minimize t(i)
-pub type TotalTimeRLScheduler<S> = RLScheduler<S, SeedTimeTestcaseScore<S>>;
