@@ -71,18 +71,27 @@ where
             let (result, new_corpus_idx) =
                 fuzzer.evaluate_input(state, executor, manager, input)?;
 
+            {
+                let mut current_testcase = state.corpus().get(corpus_idx)?.borrow_mut();
+                if !current_testcase.has_metadata::<RLFuzzTestcaseMetaData>() {
+                    let mut rlmeta = RLFuzzTestcaseMetaData::new();
+                    *rlmeta.corpus_idx_mut() = corpus_idx;
+                    *rlmeta.selected_times_mut() += 1;
+                    current_testcase.add_metadata::<RLFuzzTestcaseMetaData>(rlmeta);
+                } else {
+                    let rlmeta = current_testcase
+                        .metadata_mut()
+                        .get_mut::<RLFuzzTestcaseMetaData>()
+                        .unwrap();
+                    *rlmeta.selected_times_mut() += 1;
+                }
+            }
+
             // TODO! update metadata of the testcase
             match result {
                 crate::ExecuteInputResult::None => {}
                 crate::ExecuteInputResult::Corpus => {
-                    println!("😁 Find new testcase!");
                     let mut testcase = state.corpus().get(corpus_idx)?.borrow_mut();
-                    if !testcase.has_metadata::<RLFuzzTestcaseMetaData>() {
-                        let mut rlmeta = RLFuzzTestcaseMetaData::new();
-                        *rlmeta.corpus_idx_mut() = corpus_idx;
-                        testcase.add_metadata::<RLFuzzTestcaseMetaData>(rlmeta);
-                    }
-                    println!("😁 modify metadata of testcase {}!", corpus_idx);
                     let rlmeta = testcase
                         .metadata_mut()
                         .get_mut::<RLFuzzTestcaseMetaData>()
@@ -93,17 +102,12 @@ where
                     let generated = rlmeta.generated_mut();
                     *generated += 1;
 
-                    println!("{:?}", rlmeta);
+                    println!("😁 Find new path!");
+                    println!("\tupdate testcase {}!", corpus_idx);
+                    println!("\t{:?}", rlmeta);
                 }
                 crate::ExecuteInputResult::Solution => {
-                    println!("😁 Find new solution!");
                     let mut testcase = state.corpus().get(corpus_idx)?.borrow_mut();
-                    if !testcase.has_metadata::<RLFuzzTestcaseMetaData>() {
-                        let mut rlmeta = RLFuzzTestcaseMetaData::new();
-                        *rlmeta.corpus_idx_mut() = corpus_idx;
-                        testcase.add_metadata::<RLFuzzTestcaseMetaData>(rlmeta);
-                    }
-                    println!("😁 modify metadata of testcase {}!", corpus_idx);
                     let rlmeta = testcase
                         .metadata_mut()
                         .get_mut::<RLFuzzTestcaseMetaData>()
@@ -117,6 +121,8 @@ where
                     let new_path = rlmeta.new_path_mut();
                     *new_path += 1;
 
+                    println!("😁 Find new crash!");
+                    println!("😁 modify metadata of testcase {}!", corpus_idx);
                     println!("{:?}", rlmeta);
                 }
             };

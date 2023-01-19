@@ -53,6 +53,11 @@ where
     pub fn strategy_num(&self) -> usize {
         self.strategy_num
     }
+
+    /// invoke compute() function of self.
+    pub fn get_advice(&self, state: &S) -> Result<Vec<Vec<f64>>, Error> {
+        Self::compute(state)
+    }
 }
 
 impl<S, F, G> TestcaseDistribution<S> for TestcaseDistributionCombiner<S, F, G>
@@ -82,10 +87,15 @@ where
         let mut metrics = Vec::with_capacity(state.corpus().count());
         for idx in 0..state.corpus().count() {
             let entry = state.corpus().get(idx)?.borrow();
-            metrics.push(*entry.executions() as f64);
+            if entry.has_metadata::<RLFuzzTestcaseMetaData>() {
+                let rlmeta = entry.metadata().get::<RLFuzzTestcaseMetaData>().unwrap();
+                metrics.push(rlmeta.selected_times() as f64 + 1.0);
+            } else {
+                metrics.push(1 as f64);
+            }
         }
         let sum = metrics.iter().sum::<f64>();
-        Ok(vec![metrics.into_iter().map(|x| x / sum).collect()])
+        Ok(vec![metrics.into_iter().map(|x| (1.0 - x / sum)).collect()])
     }
 }
 
@@ -105,10 +115,9 @@ where
             let entry = state.corpus().get(idx)?.borrow();
             if entry.has_metadata::<RLFuzzTestcaseMetaData>() {
                 let rlmeta = entry.metadata().get::<RLFuzzTestcaseMetaData>().unwrap();
-                println!("generated: {}", rlmeta.generated());
-                metrics.push(rlmeta.generated() as f64)
+                metrics.push(rlmeta.generated() as f64 + 1.0);
             } else {
-                metrics.push(0 as f64)
+                metrics.push(1 as f64);
             }
         }
         let sum = metrics.iter().sum::<f64>();
@@ -171,14 +180,14 @@ where
     /// Gets the next entry. Every time this function is called, scores of all testcases will be updated.
     fn next(&self, state: &mut Self::State) -> Result<usize, Error> {
         let corpus_num = state.corpus().count();
-        let advice = F::compute(state)?;
+        let advice = self.combiner.get_advice(state)?;
 
         // init the bandit algorithm
         if !state.has_metadata::<BanditMetadata>() {
             let weights = vec![1.0; self.combiner.strategy_num()];
             state.add_metadata(BanditMetadata {
                 weights,
-                prob: Vec::with_capacity(corpus_num),
+                prob: vec![0.0; corpus_num],
                 last_advice: vec![],
                 last_selected_seed: 0,
                 last_selected_exp: 0,
@@ -200,6 +209,8 @@ where
 
         let prob = &mut bdmeta.prob;
         let weights = &bdmeta.weights;
+        // extend prob to the same length of advice
+        prob.extend(vec![0.0; advice[0].len() - prob.len()]);
         for idx in 0..corpus_num {
             let mut sum = 0.0;
             let sum_of_weight = weights.iter().sum::<f64>();
@@ -208,6 +219,19 @@ where
             }
             prob[idx] = (1.0 - self.gamma) * sum / sum_of_weight + self.gamma / corpus_num as f64;
         }
+
+        // // print advice tensor
+        // println!("😁 BanditScheduler: advice tensor is:");
+        // for exp in 0..self.combiner.strategy_num() {
+        //     println!("expert {}, weight={}", exp, weights[exp]);
+        //     for idx in 0..corpus_num {
+        //         println!("\tseed {} is {}", idx, advice[exp][idx]);
+        //     }
+        // }
+
+        // for idx in 0..corpus_num {
+        //     println!("😁 BanditScheduler: prob of seed {} is {}", idx, prob[idx]);
+        // }
 
         // select the index of max number from prob
         let mut max = 0.0;
@@ -222,6 +246,7 @@ where
         bdmeta.last_selected_seed = max_idx;
         bdmeta.reward = false;
         bdmeta.last_advice = advice;
+        // println!("😁 BanditScheduler: select seed {}", max_idx);
         Ok(max_idx)
     }
 }

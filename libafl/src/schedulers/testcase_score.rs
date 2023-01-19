@@ -67,7 +67,6 @@ where
         if entry.has_metadata::<RLFuzzTestcaseMetaData>() {
             // unwrap safety: make sure it has metadata
             let rlmeta = entry.metadata().get::<RLFuzzTestcaseMetaData>().unwrap();
-            println!("generated: {}", rlmeta.generated());
             Ok(rlmeta.generated() as f64)
         } else {
             println!("no RLFuzzTestcaseMetaData found");

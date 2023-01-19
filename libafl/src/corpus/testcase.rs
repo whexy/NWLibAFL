@@ -277,6 +277,8 @@ where
 pub struct RLFuzzTestcaseMetaData {
     /// corpus index
     corpus_idx: usize,
+    /// selected times
+    selected_times: usize,
     /// Number of generated inputs exercising this testcase
     exercise: usize,
     /// Number of generated inputs from this testcase
@@ -291,6 +293,7 @@ impl RLFuzzTestcaseMetaData {
     pub fn new() -> Self {
         Self {
             corpus_idx: 0,
+            selected_times: 0,
             exercise: 0,
             generated: 0,
             new_path: 0,
@@ -307,6 +310,18 @@ impl RLFuzzTestcaseMetaData {
     #[inline]
     pub fn corpus_idx_mut(&mut self) -> &mut usize {
         &mut self.corpus_idx
+    }
+
+    /// Get the selected times
+    #[inline]
+    pub fn selected_times(&self) -> usize {
+        self.selected_times
+    }
+
+    /// Get the selected times (mutable)
+    #[inline]
+    pub fn selected_times_mut(&mut self) -> &mut usize {
+        &mut self.selected_times
     }
 
     /// Get the exercise
