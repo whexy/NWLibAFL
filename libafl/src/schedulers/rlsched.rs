@@ -123,8 +123,11 @@ where
                 metrics.push(1 as f64);
             }
         }
-        let sum = metrics.iter().sum::<f64>();
-        Ok(vec![metrics.into_iter().map(|x| x / sum).collect()])
+        let sum = metrics.iter().map(|x| 1.0 / x).sum::<f64>();
+        Ok(vec![metrics
+            .into_iter()
+            .map(|x| ((1.0 / x) / sum))
+            .collect()])
     }
 }
 
@@ -186,16 +189,85 @@ where
     }
 }
 
+/// Expected time to generate new path, M(i)/t(i)
+#[derive(Debug, Clone)]
+pub struct ExpectedTimeDistribution<S> {
+    phantom: PhantomData<S>,
+}
+
+impl<S> TestcaseDistribution<S> for ExpectedTimeDistribution<S>
+where
+    S: HasCorpus + HasMetadata,
+{
+    fn compute(state: &S) -> Result<Vec<Vec<f64>>, Error> {
+        let mut metrics = Vec::with_capacity(state.corpus().count());
+        for idx in 0..state.corpus().count() {
+            let entry = state.corpus().get(idx)?.borrow();
+            if entry.has_metadata::<RLFuzzTestcaseMetaData>() {
+                let rlmeta = entry.metadata().get::<RLFuzzTestcaseMetaData>().unwrap();
+                let generated = rlmeta.generated() + 1;
+                let total_time = rlmeta.total_time().as_secs_f32() as f64 + 1.0;
+                metrics.push(generated as f64 / total_time);
+            } else {
+                metrics.push(1 as f64);
+            }
+        }
+        let sum = metrics.iter().sum::<f64>();
+        Ok(vec![metrics.into_iter().map(|x| (x / sum)).collect()])
+    }
+}
+
+/// EcoFuzz: fii / sqrt(i)
+#[derive(Debug, Clone)]
+pub struct EcoFuzzDistribution<S> {
+    phantom: PhantomData<S>,
+}
+
+impl<S> TestcaseDistribution<S> for EcoFuzzDistribution<S>
+where
+    S: HasCorpus + HasMetadata,
+{
+    fn compute(state: &S) -> Result<Vec<Vec<f64>>, Error> {
+        let mut metrics = Vec::with_capacity(state.corpus().count());
+        for idx in 0..state.corpus().count() {
+            let entry = state.corpus().get(idx)?.borrow();
+            if entry.has_metadata::<RLFuzzTestcaseMetaData>() {
+                let rlmeta = entry.metadata().get::<RLFuzzTestcaseMetaData>().unwrap();
+                let generated = rlmeta.generated() + 1;
+                let selection = rlmeta.selected_times() + 1;
+                let self_transition_ratio = (selection - generated) as f64 / selection as f64;
+                metrics.push(1.0 - self_transition_ratio / (idx as f64 + 1.0).sqrt());
+            } else {
+                metrics.push(1 as f64);
+            }
+        }
+        let sum = metrics.iter().sum::<f64>();
+        Ok(vec![metrics.into_iter().map(|x| (x / sum)).collect()])
+    }
+}
+
 /// Temporary type used for testing, combine all distributions together.
 //  TODO: implement a macro for combining distributions.
 pub type CombinedDistribution<S> = TestcaseDistributionCombiner<
     S,
     TestcaseDistributionCombiner<
         S,
-        TestcaseDistributionCombiner<S, SeedSelectionDistribution<S>, SeedGeneratedDistribution<S>>,
-        SlimeDistribution<S>,
+        TestcaseDistributionCombiner<
+            S,
+            TestcaseDistributionCombiner<
+                S,
+                TestcaseDistributionCombiner<
+                    S,
+                    SeedSelectionDistribution<S>,
+                    SeedGeneratedDistribution<S>,
+                >,
+                SlimeDistribution<S>,
+            >,
+            TimeDistribution<S>,
+        >,
+        ExpectedTimeDistribution<S>,
     >,
-    TimeDistribution<S>,
+    EcoFuzzDistribution<S>,
 >;
 
 /// The metadata used in bendit algorithm
@@ -270,6 +342,12 @@ where
                 let y = reward_hat * last_advice[exp][bdmeta.last_selected_seed];
                 weights[exp] *= (self.gamma * y / corpus_num as f64).exp();
             }
+
+            if bdmeta.reward {
+                for exp in 0..self.combiner.strategy_num() {
+                    println!("expert {}, weight={}", exp, weights[exp]);
+                }
+            }
         }
 
         let bdmeta = state.metadata_mut().get_mut::<BanditMetadata>().unwrap();
@@ -290,15 +368,15 @@ where
         // print advice tensor
         // println!("😁 BanditScheduler: advice tensor is:");
         // for exp in 0..self.combiner.strategy_num() {
-        // println!("expert {}, weight={}", exp, weights[exp]);
-        // for idx in 0..corpus_num {
-        //     println!("\tseed {} is {}", idx, advice[exp][idx]);
-        //     // }
+        //     println!("expert {}, weight={}", exp, weights[exp]);
+        //     for idx in 0..corpus_num {
+        //         println!("\tseed {} is {}", idx, advice[exp][idx]);
+        //     }
         // }
 
-        // for idx in 0..corpus_num {
-        //     println!("😁 BanditScheduler: prob of seed {} is {}", idx, prob[idx]);
-        // }
+        for idx in 0..corpus_num {
+            println!("😁 BanditScheduler: prob of seed {} is {}", idx, prob[idx]);
+        }
 
         // select the index of max number from prob
         let mut max = 0.0;
