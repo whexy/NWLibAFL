@@ -94,8 +94,11 @@ where
                 metrics.push(1 as f64);
             }
         }
-        let sum = metrics.iter().sum::<f64>();
-        Ok(vec![metrics.into_iter().map(|x| (1.0 - x / sum)).collect()])
+        let sum = metrics.iter().map(|x| 1.0 / x).sum::<f64>();
+        Ok(vec![metrics
+            .into_iter()
+            .map(|x| ((1.0 / x) / sum))
+            .collect()])
     }
 }
 
@@ -125,10 +128,75 @@ where
     }
 }
 
+/// SLIME: M(i)/s(i)
+#[derive(Debug, Clone)]
+pub struct SlimeDistribution<S> {
+    phantom: PhantomData<S>,
+}
+
+impl<S> TestcaseDistribution<S> for SlimeDistribution<S>
+where
+    S: HasCorpus + HasMetadata,
+{
+    fn compute(state: &S) -> Result<Vec<Vec<f64>>, Error> {
+        let mut metrics = Vec::with_capacity(state.corpus().count());
+        for idx in 0..state.corpus().count() {
+            let entry = state.corpus().get(idx)?.borrow();
+            if entry.has_metadata::<RLFuzzTestcaseMetaData>() {
+                let rlmeta = entry.metadata().get::<RLFuzzTestcaseMetaData>().unwrap();
+                // add one to make sure we don't generate NaN.
+                let generated = rlmeta.generated() + 1;
+                let selected_times = rlmeta.selected_times() + 1;
+                metrics.push(generated as f64 / selected_times as f64);
+            } else {
+                metrics.push(1 as f64);
+            }
+        }
+        let sum = metrics.iter().sum::<f64>();
+        Ok(vec![metrics.into_iter().map(|x| x / sum).collect()])
+    }
+}
+
+/// Time spent on each seed
+#[derive(Debug, Clone)]
+pub struct TimeDistribution<S> {
+    phantom: PhantomData<S>,
+}
+
+impl<S> TestcaseDistribution<S> for TimeDistribution<S>
+where
+    S: HasCorpus + HasMetadata,
+{
+    fn compute(state: &S) -> Result<Vec<Vec<f64>>, Error> {
+        let mut metrics = Vec::with_capacity(state.corpus().count());
+        for idx in 0..state.corpus().count() {
+            let entry = state.corpus().get(idx)?.borrow();
+            if entry.has_metadata::<RLFuzzTestcaseMetaData>() {
+                let rlmeta = entry.metadata().get::<RLFuzzTestcaseMetaData>().unwrap();
+                metrics.push(rlmeta.total_time().as_secs_f32() as f64 + 1.0);
+            } else {
+                metrics.push(1 as f64);
+            }
+        }
+        let sum = metrics.iter().map(|x| 1.0 / x).sum::<f64>();
+        Ok(vec![metrics
+            .into_iter()
+            .map(|x| ((1.0 / x) / sum))
+            .collect()])
+    }
+}
+
 /// Temporary type used for testing, combine all distributions together.
 //  TODO: implement a macro for combining distributions.
-pub type CombinedDistribution<S> =
-    TestcaseDistributionCombiner<S, SeedSelectionDistribution<S>, SeedGeneratedDistribution<S>>;
+pub type CombinedDistribution<S> = TestcaseDistributionCombiner<
+    S,
+    TestcaseDistributionCombiner<
+        S,
+        TestcaseDistributionCombiner<S, SeedSelectionDistribution<S>, SeedGeneratedDistribution<S>>,
+        SlimeDistribution<S>,
+    >,
+    TimeDistribution<S>,
+>;
 
 /// The metadata used in bendit algorithm
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -141,10 +209,8 @@ pub struct BanditMetadata {
     last_advice: Vec<Vec<f64>>,
     /// index of the last selected seed
     last_selected_seed: usize,
-    /// index of the last selected expert
-    last_selected_exp: usize,
     /// if the last seed generated new path
-    reward: bool,
+    pub reward: bool,
 }
 
 crate::impl_serdeany!(BanditMetadata);
@@ -190,7 +256,6 @@ where
                 prob: vec![0.0; corpus_num],
                 last_advice: vec![],
                 last_selected_seed: 0,
-                last_selected_exp: 0,
                 reward: false,
             })
         } else {
@@ -201,8 +266,10 @@ where
             let prob = &bdmeta.prob;
             let reward = if bdmeta.reward { 1.0 } else { 0.0 };
             let reward_hat = reward / prob[bdmeta.last_selected_seed];
-            let y = reward_hat * last_advice[bdmeta.last_selected_exp][bdmeta.last_selected_seed];
-            weights[bdmeta.last_selected_exp] *= (self.gamma * y / corpus_num as f64).exp();
+            for exp in 0..self.combiner.strategy_num() {
+                let y = reward_hat * last_advice[exp][bdmeta.last_selected_seed];
+                weights[exp] *= (self.gamma * y / corpus_num as f64).exp();
+            }
         }
 
         let bdmeta = state.metadata_mut().get_mut::<BanditMetadata>().unwrap();
@@ -220,13 +287,13 @@ where
             prob[idx] = (1.0 - self.gamma) * sum / sum_of_weight + self.gamma / corpus_num as f64;
         }
 
-        // // print advice tensor
+        // print advice tensor
         // println!("😁 BanditScheduler: advice tensor is:");
         // for exp in 0..self.combiner.strategy_num() {
-        //     println!("expert {}, weight={}", exp, weights[exp]);
-        //     for idx in 0..corpus_num {
-        //         println!("\tseed {} is {}", idx, advice[exp][idx]);
-        //     }
+        // println!("expert {}, weight={}", exp, weights[exp]);
+        // for idx in 0..corpus_num {
+        //     println!("\tseed {} is {}", idx, advice[exp][idx]);
+        //     // }
         // }
 
         // for idx in 0..corpus_num {

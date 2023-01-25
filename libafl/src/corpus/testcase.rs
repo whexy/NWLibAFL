@@ -285,6 +285,10 @@ pub struct RLFuzzTestcaseMetaData {
     generated: usize,
     /// Number of crashes or new paths found from this testcase
     new_path: usize,
+    /// Total time spent on fuzzing this seed
+    total_time: Duration,
+    /// Hash of edge map
+    hash: u64,
 }
 
 impl RLFuzzTestcaseMetaData {
@@ -297,6 +301,8 @@ impl RLFuzzTestcaseMetaData {
             exercise: 0,
             generated: 0,
             new_path: 0,
+            total_time: Duration::from_secs(0),
+            hash: 0,
         }
     }
 
@@ -358,6 +364,30 @@ impl RLFuzzTestcaseMetaData {
     #[inline]
     pub fn new_path_mut(&mut self) -> &mut usize {
         &mut self.new_path
+    }
+
+    /// Get the total time
+    #[inline]
+    pub fn total_time(&self) -> Duration {
+        self.total_time
+    }
+
+    /// Get the total time (mutable)
+    #[inline]
+    pub fn total_time_mut(&mut self) -> &mut Duration {
+        &mut self.total_time
+    }
+
+    /// Get the hash
+    #[inline]
+    pub fn hash(&self) -> u64 {
+        self.hash
+    }
+
+    /// Get the hash (mutable)
+    #[inline]
+    pub fn hash_mut(&mut self) -> &mut u64 {
+        &mut self.hash
     }
 }
 

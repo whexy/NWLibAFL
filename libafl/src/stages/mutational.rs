@@ -2,17 +2,21 @@
 //! For the current input, it will perform a range of random mutations, and then run them in the executor.
 
 use alloc::string::ToString;
-use core::marker::PhantomData;
+use core::{marker::PhantomData, slice::from_raw_parts};
+use std::hash::Hasher;
+
+use ahash::AHasher;
 
 #[cfg(feature = "introspection")]
 use crate::monitors::PerfFeature;
 use crate::{
-    bolts::rands::Rand,
+    bolts::{current_time, rands::Rand},
     corpus::{testcase::RLFuzzTestcaseMetaData, Corpus},
+    feedbacks::MapIndexesMetadata,
     fuzzer::Evaluator,
     mark_feature_time,
     mutators::Mutator,
-    prelude::HasMetadata,
+    prelude::{rlsched::BanditMetadata, HasMetadata},
     stages::Stage,
     start_timer,
     state::{HasClientPerfMonitor, HasCorpus, HasRand, UsesState},
@@ -30,7 +34,7 @@ where
     M: Mutator<Self::State>,
     EM: UsesState<State = Self::State>,
     Z: Evaluator<E, EM, State = Self::State>,
-    Self::State: HasClientPerfMonitor + HasCorpus,
+    Self::State: HasClientPerfMonitor + HasCorpus + HasMetadata,
 {
     /// The mutator registered for this stage
     fn mutator(&self) -> &M;
@@ -68,15 +72,39 @@ where
             mark_feature_time!(state, PerfFeature::Mutate);
 
             // Time is measured directly the `evaluate_input` function
+            let start = current_time();
             let (result, new_corpus_idx) =
                 fuzzer.evaluate_input(state, executor, manager, input)?;
+            let once_time = current_time() - start;
 
+            // [current testcase] update corpus index i,
+            //                           edge map hash,
+            //                           selected times s(i),
+            //                           and total time t(i).
             {
                 let mut current_testcase = state.corpus().get(corpus_idx)?.borrow_mut();
                 if !current_testcase.has_metadata::<RLFuzzTestcaseMetaData>() {
                     let mut rlmeta = RLFuzzTestcaseMetaData::new();
                     *rlmeta.corpus_idx_mut() = corpus_idx;
                     *rlmeta.selected_times_mut() += 1;
+                    *rlmeta.total_time_mut() += once_time;
+
+                    let mapmeta = current_testcase
+                        .metadata()
+                        .get::<MapIndexesMetadata>()
+                        .ok_or_else(|| {
+                            Error::key_not_found("Failed to get MapIndexesMetadata".to_string())
+                        })?;
+                    let mut hasher = AHasher::default();
+                    let slice = mapmeta.list.as_slice();
+                    let ptr = slice.as_ptr() as *const u8;
+                    let map_size = slice.len() * std::mem::size_of::<usize>();
+                    unsafe {
+                        let raw_mem = from_raw_parts(ptr, map_size);
+                        hasher.write(raw_mem);
+                    }
+                    let hash = hasher.finish();
+                    *rlmeta.hash_mut() = hash;
                     current_testcase.add_metadata::<RLFuzzTestcaseMetaData>(rlmeta);
                 } else {
                     let rlmeta = current_testcase
@@ -84,46 +112,35 @@ where
                         .get_mut::<RLFuzzTestcaseMetaData>()
                         .unwrap();
                     *rlmeta.selected_times_mut() += 1;
+                    *rlmeta.total_time_mut() += once_time;
                 }
             }
 
-            // TODO! update metadata of the testcase
             match result {
                 crate::ExecuteInputResult::None => {}
-                crate::ExecuteInputResult::Corpus => {
-                    let mut testcase = state.corpus().get(corpus_idx)?.borrow_mut();
-                    let rlmeta = testcase
-                        .metadata_mut()
-                        .get_mut::<RLFuzzTestcaseMetaData>()
-                        .ok_or_else(|| {
-                            Error::key_not_found("Failed to get RLFuzzMetadata".to_string())
-                        })?;
+                crate::ExecuteInputResult::Corpus | crate::ExecuteInputResult::Solution => {
+                    // [current testcase, new path found] update generated N(i).
+                    {
+                        let mut testcase = state.corpus().get(corpus_idx)?.borrow_mut();
+                        let rlmeta = testcase
+                            .metadata_mut()
+                            .get_mut::<RLFuzzTestcaseMetaData>()
+                            .ok_or_else(|| {
+                                Error::key_not_found("Failed to get RLFuzzMetadata".to_string())
+                            })?;
 
-                    let generated = rlmeta.generated_mut();
-                    *generated += 1;
+                        let generated = rlmeta.generated_mut();
+                        *generated += 1;
 
-                    println!("😁 Find new path!");
-                    println!("\tupdate testcase {}!", corpus_idx);
-                    println!("\t{:?}", rlmeta);
-                }
-                crate::ExecuteInputResult::Solution => {
-                    let mut testcase = state.corpus().get(corpus_idx)?.borrow_mut();
-                    let rlmeta = testcase
-                        .metadata_mut()
-                        .get_mut::<RLFuzzTestcaseMetaData>()
-                        .ok_or_else(|| {
-                            Error::key_not_found("Failed to get RLFuzzMetadata".to_string())
-                        })?;
+                        println!("😁 Find new path!");
+                        println!("\tupdate testcase {}!", corpus_idx);
+                        println!("\t{:?}", rlmeta);
+                    }
 
-                    let generated = rlmeta.generated_mut();
-                    *generated += 1;
-
-                    let new_path = rlmeta.new_path_mut();
-                    *new_path += 1;
-
-                    println!("😁 Find new crash!");
-                    println!("😁 modify metadata of testcase {}!", corpus_idx);
-                    println!("{:?}", rlmeta);
+                    {
+                        let mut bdmeta = state.metadata_mut().get_mut::<BanditMetadata>().unwrap();
+                        bdmeta.reward = true;
+                    }
                 }
             };
 
@@ -154,7 +171,7 @@ where
     EM: UsesState<State = Z::State>,
     M: Mutator<Z::State>,
     Z: Evaluator<E, EM>,
-    Z::State: HasClientPerfMonitor + HasCorpus + HasRand,
+    Z::State: HasClientPerfMonitor + HasCorpus + HasRand + HasMetadata,
 {
     /// The mutator, added to this stage
     #[inline]
@@ -180,7 +197,7 @@ where
     EM: UsesState<State = Z::State>,
     M: Mutator<Z::State>,
     Z: Evaluator<E, EM>,
-    Z::State: HasClientPerfMonitor + HasCorpus + HasRand,
+    Z::State: HasClientPerfMonitor + HasCorpus + HasRand + HasMetadata,
 {
     type State = Z::State;
 }
@@ -191,7 +208,7 @@ where
     EM: UsesState<State = Z::State>,
     M: Mutator<Z::State>,
     Z: Evaluator<E, EM>,
-    Z::State: HasClientPerfMonitor + HasCorpus + HasRand,
+    Z::State: HasClientPerfMonitor + HasCorpus + HasRand + HasMetadata,
 {
     #[inline]
     #[allow(clippy::let_and_return)]
